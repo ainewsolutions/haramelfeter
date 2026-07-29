@@ -10,14 +10,14 @@
     <style>
         :root {
             /* Light Theme - Haram El Feteer Colors (Maroon, Cream, Gold/Brown) */
-            --bg-color: #fdfaf6; /* Creamy background */
+            --bg-color: #fdfaf6;
             --surface-color: #ffffff;
-            --text-main: #2b1d16; /* Dark brown/black */
+            --text-main: #2b1d16;
             --text-muted: #735c4f;
-            --primary-color: #9c1f20; /* Maroon/Dark Red */
+            --primary-color: #9c1f20;
             --primary-hover: #7a1516;
-            --secondary-color: #c98a3c; /* Golden Brown */
-            --accent-color: #e3b06b; /* Light Gold */
+            --secondary-color: #c98a3c;
+            --accent-color: #e3b06b;
             --border-color: #e8dbce;
             --danger-color: #d32f2f;
             --success-color: #2e7d32;
@@ -681,27 +681,6 @@
             color: var(--primary-color);
         }
 
-        .checkout-btn {
-            background-color: #25D366; 
-            color: white;
-            width: 100%;
-            padding: 1.2rem;
-            border-radius: var(--radius-md);
-            font-size: 1.2rem;
-            font-weight: 900;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 0.5rem;
-            box-shadow: 0 4px 12px rgba(37, 211, 102, 0.3);
-            border: 2px solid rgba(255,255,255,0.2);
-        }
-
-        .checkout-btn:hover:not(:disabled) {
-            background-color: #128C7E;
-            transform: translateY(-2px);
-        }
-
         .scroll-top {
             position: fixed;
             bottom: 5.5rem;
@@ -963,16 +942,32 @@
             if (rows.length < 2) return;
 
             const headers = rows[0].map(h => h.trim());
-            let colMap = { category: -1, name: -1, desc: -1, price: -1, size: -1 };
+            // Added icon mapping to prevent confusing category name with category icon
+            let colMap = { category: -1, icon: -1, name: -1, desc: -1, price: -1, size: -1 };
             let sizeCols = [];
             
             headers.forEach((h, i) => {
                 const lowerH = h.toLowerCase();
-                if (colMap.category === -1 && /القسم|تصنيف|category|قسم/.test(lowerH)) colMap.category = i;
-                else if (colMap.name === -1 && /الصنف|الاسم|اسم|name|item/.test(lowerH)) colMap.name = i;
-                else if (colMap.desc === -1 && /الوصف|المكونات|تفاصيل|desc/.test(lowerH)) colMap.desc = i;
-                else if (colMap.price === -1 && /السعر|price/.test(lowerH)) colMap.price = i;
-                else if (colMap.size === -1 && /الحجم|المقاس|size/.test(lowerH)) colMap.size = i;
+                // 1. Check for icon first (so category_icon doesn't trigger category map)
+                if (colMap.icon === -1 && (lowerH.includes('icon') || lowerH.includes('ايكون') || lowerH.includes('أيقون'))) {
+                    colMap.icon = i;
+                } 
+                // 2. Safely check for category
+                else if (colMap.category === -1 && /القسم|تصنيف|category|قسم/.test(lowerH)) {
+                    colMap.category = i;
+                }
+                else if (colMap.name === -1 && /الصنف|الاسم|اسم|name|item/.test(lowerH)) {
+                    colMap.name = i;
+                }
+                else if (colMap.desc === -1 && /الوصف|المكونات|تفاصيل|desc/.test(lowerH)) {
+                    colMap.desc = i;
+                }
+                else if (colMap.price === -1 && /السعر|price/.test(lowerH)) {
+                    colMap.price = i;
+                }
+                else if (colMap.size === -1 && /الحجم|المقاس|size/.test(lowerH)) {
+                    colMap.size = i;
+                }
             });
 
             // Default mapping if headers are vaguely named
@@ -982,7 +977,7 @@
 
             if (colMap.price === -1 && colMap.size === -1) {
                 headers.forEach((h, i) => {
-                    if (i !== colMap.category && i !== colMap.name && i !== colMap.desc) {
+                    if (i !== colMap.category && i !== colMap.icon && i !== colMap.name && i !== colMap.desc) {
                         sizeCols.push({ index: i, name: h || 'سعر موحد' });
                     }
                 });
@@ -1011,10 +1006,14 @@
                 const itemName = row[colMap.name] ? row[colMap.name].trim() : '';
                 if (!itemName) continue;
 
+                // Extract Name correctly
                 const catName = (row[colMap.category] ? row[colMap.category].trim() : '') || 'قائمة أخرى';
                 
+                // Extract Icon explicitly if found in sheet, otherwise default
+                const catIcon = (colMap.icon > -1 && row[colMap.icon]) ? row[colMap.icon].trim() : getCategoryIcon(catName);
+                
                 if (!menuMap.has(catName)) {
-                    menuMap.set(catName, { id: 'cat_' + i, name: catName, icon: getCategoryIcon(catName), itemsMap: new Map() });
+                    menuMap.set(catName, { id: 'cat_' + i, name: catName, icon: catIcon, itemsMap: new Map() });
                 }
                 
                 const catObj = menuMap.get(catName);
@@ -1058,7 +1057,8 @@
         function renderCategories() {
             let html = `<button class="category-btn active" data-cat="all">🍽️ كل المنيو</button>`;
             menuData.forEach(cat => {
-                html += `<button class="category-btn" data-cat="${cat.id}">${cat.name}</button>`;
+                // Now displays icon and name exactly as intended: 🌮 الكريب الحادق
+                html += `<button class="category-btn" data-cat="${cat.id}">${cat.icon} ${cat.name}</button>`;
             });
             elements.categoriesNav.innerHTML = html;
         }
