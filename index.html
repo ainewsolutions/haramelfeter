@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
@@ -1056,9 +1056,9 @@
         }
 
         function renderCategories() {
-            let html = `<button class="category-btn active" data-cat="all">🍽️ كل المنيو</button>`;
+            let html = `<button class="category-btn active" data-cat="all">الكل</button>`;
             menuData.forEach(cat => {
-                html += `<button class="category-btn" data-cat="${cat.id}">${cat.icon} ${cat.name}</button>`;
+                html += `<button class="category-btn" data-cat="${cat.id}">${cat.name}</button>`;
             });
             elements.categoriesNav.innerHTML = html;
         }
