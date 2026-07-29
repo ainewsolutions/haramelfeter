@@ -1056,9 +1056,9 @@
         }
 
         function renderCategories() {
-            let html = `<button class="category-btn active" data-cat="all">الكل</button>`;
+            let html = `<button class="category-btn active" data-cat="all">🍽️ كل المنيو</button>`;
             menuData.forEach(cat => {
-                html += `<button class="category-btn" data-cat="${cat.id}">${cat.name}</button>`;
+                html += `<button class="category-btn" data-cat="${cat.id}"><img src="${cat.icon}" alt="${cat.name}" style="width:24px;height:24px;object-fit:contain;"> ${cat.name}</button>`;
             });
             elements.categoriesNav.innerHTML = html;
         }
