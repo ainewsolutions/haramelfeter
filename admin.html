@@ -1,0 +1,1700 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="robots" content="noindex, nofollow" />
+<title>لوحة تحكم هرم الفطير</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          maroon: { DEFAULT: "#9c1f20", dark: "#7a1516" },
+          gold: { DEFAULT: "#c98a3c", light: "#e3b06b" },
+          cream: "#fdfaf6",
+          brown: { DEFAULT: "#2b1d16", muted: "#735c4f" },
+          line: "#e8dbce",
+        },
+        fontFamily: { sans: ["Cairo", "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "sans-serif"] },
+      },
+    },
+  };
+</script>
+
+<!-- React (الكود متحوّل مسبقًا — مفيش Babel في المتصفح) -->
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+
+<style>
+  body { font-family: "Cairo", "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif; background: #fdfaf6; color: #2b1d16; }
+  .fade-in { animation: fadeIn .2s ease; }
+  .pop-in { animation: popIn .22s cubic-bezier(.2,.9,.3,1.2); }
+  @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+  @keyframes popIn { from { opacity: 0; transform: scale(.96) } to { opacity: 1; transform: scale(1) } }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { scrollbar-width: none; }
+  .drag-over { background: #fbeee0; }
+  [draggable="true"] { user-select: none; }
+</style>
+</head>
+<body>
+<div id="root">
+  <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;color:#735c4f;font-weight:700">جارِ تحميل لوحة التحكم...</div>
+</div>
+
+<script src="js/config.js?v=202609300833"></script>
+<script>
+// ============================================================
+// هرم الفطير — Data layer (مشترك بين صفحة المنيو ولوحة التحكم)
+// القراءة: مباشرة من جوجل شيت (gviz CSV) — سريعة ومن غير Apps Script.
+// لو فشلت لأي سبب، بنجرب Apps Script كبديل.
+// الكتابة: Apps Script فقط.
+// ============================================================
+
+function hfParseCsv(text) {
+  const rows = [];
+  let row = [], field = "", inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; } else inQuotes = false;
+      } else field += ch;
+    } else if (ch === '"') inQuotes = true;
+    else if (ch === ",") { row.push(field); field = ""; }
+    else if (ch === "\n") { row.push(field); field = ""; rows.push(row); row = []; }
+    else if (ch !== "\r") field += ch;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.some((c) => c !== ""));
+}
+
+async function hfFetchSheet(sheetName) {
+  const url = `https://docs.google.com/spreadsheets/d/${HARAM_CONFIG.sheetId}/gviz/tq?tqx=out:csv&headers=1&sheet=${encodeURIComponent(sheetName)}&_=${Date.now()}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`تعذر قراءة شيت ${sheetName} (HTTP ${res.status})`);
+  const text = await res.text();
+  if (/^\s*<(!doctype|html)/i.test(text)) throw new Error("الشيت مش متشارك للعرض (Anyone with the link)");
+  const rows = hfParseCsv(text);
+  if (!rows.length) return [];
+  const headers = rows[0].map((h) => h.trim());
+  return rows.slice(1).map((r) => {
+    const o = {};
+    headers.forEach((h, i) => { o[h] = r[i] !== undefined ? r[i] : ""; });
+    return o;
+  });
+}
+
+function hfToBool(v) {
+  const s = String(v).trim().toUpperCase();
+  return s === "TRUE" || s === "1" || s === "YES" || s === "نعم";
+}
+function hfToNumber(v) {
+  const s = String(v == null ? "" : v)
+    .replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d))
+    .replace(/[^\d.\-]/g, "");
+  return s === "" ? NaN : parseFloat(s);
+}
+// "M:100 | L:120"  أو  "100"  →  [{label, price}]
+function hfParseSizes(t) {
+  if (Array.isArray(t)) return t;
+  return String(t || "").split("|").map((part) => {
+    part = part.trim();
+    if (!part) return null;
+    const idx = part.lastIndexOf(":");
+    const label = idx > -1 ? part.slice(0, idx).trim() : "";
+    const price = hfToNumber(idx > -1 ? part.slice(idx + 1) : part);
+    return isNaN(price) ? null : { label, price };
+  }).filter(Boolean);
+}
+
+function hfNormalize(raw) {
+  const categories = (raw.categories || []).map((c) => ({
+    id: String(c.id || ""), name: String(c.name || ""), icon: String(c.icon || ""),
+    bannerImage: String(c.bannerImage || ""), order: Number(c.order) || 0,
+    active: typeof c.active === "boolean" ? c.active : hfToBool(c.active),
+  })).filter((c) => c.id && c.name).sort((a, b) => a.order - b.order);
+
+  const items = (raw.items || []).map((it) => ({
+    id: String(it.id || ""), categoryId: String(it.categoryId || ""), name: String(it.name || ""),
+    description: String(it.description || ""), sizes: hfParseSizes(it.sizes), image: String(it.image || ""),
+    available: typeof it.available === "boolean" ? it.available : hfToBool(it.available),
+    order: Number(it.order) || 0,
+  })).filter((it) => it.id && it.name).sort((a, b) => a.order - b.order);
+
+  let settings = raw.settings || {};
+  if (Array.isArray(settings)) {
+    const s = {};
+    settings.forEach((r) => { if (r.key) s[String(r.key)] = r.value == null ? "" : String(r.value); });
+    settings = s;
+  }
+  return { categories, items, settings };
+}
+
+const HFData = {
+  async bootstrap() {
+    try {
+      const [categories, items, settings] = await Promise.all([
+        hfFetchSheet("Categories"), hfFetchSheet("Items"), hfFetchSheet("Settings"),
+      ]);
+      return hfNormalize({ categories, items, settings });
+    } catch (err) {
+      console.warn("gviz فشل، بنجرب Apps Script:", err);
+      const res = await fetch(`${HARAM_CONFIG.apiUrl}?action=bootstrap`);
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error || "تعذر تحميل المنيو");
+      return hfNormalize(json.data);
+    }
+  },
+
+  // لوحة التحكم: بتقرا من Apps Script مباشرة (أحدث نسخة من الشيت بالظبط)،
+  // ولو فشل بترجع للقراءة العادية
+  async bootstrapFromApi() {
+    try {
+      const res = await fetch(`${HARAM_CONFIG.apiUrl}?action=bootstrap&_=${Date.now()}`);
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error || "bootstrap failed");
+      return Object.assign(hfNormalize(json.data), { apiVersion: Number(json.data.apiVersion) || 1, source: "api" });
+    } catch (err) {
+      console.warn("Apps Script bootstrap فشل، بنقرا من الشيت:", err);
+      return HFData.bootstrap();
+    }
+  },
+
+  // تسجيل الطلب في شيت Orders — sendBeacon عشان يوصل حتى لو الصفحة راحت للواتساب
+  logOrder(order) {
+    try {
+      const body = JSON.stringify({ action: "addOrder", order });
+      if (navigator.sendBeacon && navigator.sendBeacon(HARAM_CONFIG.apiUrl, new Blob([body], { type: "text/plain;charset=utf-8" }))) return;
+      fetch(HARAM_CONFIG.apiUrl, { method: "POST", body, keepalive: true, headers: { "Content-Type": "text/plain;charset=utf-8" } }).catch(() => {});
+    } catch (e) { /* تسجيل الطلب اختياري — الواتساب هو الأساس */ }
+  },
+};
+
+</script>
+<script>
+function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
+// ============================================================
+// هرم الفطير — لوحة التحكم
+// كل تعديل بيتحفظ فورًا في جوجل شيت عن طريق Apps Script،
+// والصور بتترفع على جوجل درايف وبيتحفظ رابطها في الشيت.
+// ============================================================
+const {
+  useState,
+  useEffect,
+  useRef,
+  useMemo
+} = React;
+const ADMIN_VERSION = "2.0";
+const REQUIRED_API_VERSION = 2;
+
+// ---------------- API ----------------
+const API = {
+  token: (() => {
+    try {
+      return sessionStorage.getItem("hf_admin_token") || "";
+    } catch (e) {
+      return "";
+    }
+  })(),
+  setToken(t) {
+    API.token = t || "";
+    try {
+      t ? sessionStorage.setItem("hf_admin_token", t) : sessionStorage.removeItem("hf_admin_token");
+    } catch (e) {}
+  },
+  async post(action, payload, retries) {
+    retries = retries == null ? 1 : retries;
+    let lastErr;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const res = await fetch(HARAM_CONFIG.apiUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "text/plain;charset=utf-8"
+          },
+          // يتفادى CORS preflight
+          body: JSON.stringify(Object.assign({
+            action,
+            token: API.token
+          }, payload))
+        });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const json = await res.json();
+        if (!json.ok) {
+          if (/انتهت الجلسة/.test(json.error || "")) {
+            API.setToken("");
+            window.dispatchEvent(new Event("hf-logout"));
+          }
+          const e = new Error(json.error || "حصل خطأ غير متوقع");
+          e.fatal = true;
+          throw e;
+        }
+        return json;
+      } catch (err) {
+        lastErr = err;
+        if (err.fatal) break;
+        if (attempt < retries) await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+      }
+    }
+    throw lastErr;
+  },
+  async getOrders() {
+    const res = await fetch(`${HARAM_CONFIG.apiUrl}?action=orders&token=${encodeURIComponent(API.token)}`);
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || "تعذر تحميل الطلبات");
+    return json.data;
+  },
+  async uploadImage(file) {
+    const {
+      base64,
+      mimeType
+    } = await resizeImageToBase64(file);
+    const safeName = (file.name || "image").replace(/\.[^.]+$/, "") + ".jpg";
+    const res = await API.post("uploadImage", {
+      fileName: safeName,
+      mimeType,
+      base64Data: base64
+    }, 0);
+    return res.url;
+  }
+};
+
+// بيصغّر الصورة قبل الرفع (أسرع وأخف على الشبكة والدرايف)
+function resizeImageToBase64(file, maxDim, quality) {
+  maxDim = maxDim || 1400;
+  quality = quality || 0.82;
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = reject;
+    reader.onload = e => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("الملف مش صورة صالحة"));
+      img.onload = () => {
+        let w = img.width,
+          h = img.height;
+        if (w > maxDim || h > maxDim) {
+          const s = maxDim / Math.max(w, h);
+          w = Math.round(w * s);
+          h = Math.round(h * s);
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, w, h); // PNG شفاف → خلفية بيضا
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve({
+          base64: canvas.toDataURL("image/jpeg", quality).split(",")[1],
+          mimeType: "image/jpeg"
+        });
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// ---------------- Icons ----------------
+const Icon = {
+  drag: p => /*#__PURE__*/React.createElement("svg", _extends({}, p, {
+    viewBox: "0 0 24 24",
+    fill: "currentColor"
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: "9",
+    cy: "6",
+    r: "1.6"
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: "15",
+    cy: "6",
+    r: "1.6"
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: "9",
+    cy: "12",
+    r: "1.6"
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: "15",
+    cy: "12",
+    r: "1.6"
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: "9",
+    cy: "18",
+    r: "1.6"
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: "15",
+    cy: "18",
+    r: "1.6"
+  })),
+  edit: p => /*#__PURE__*/React.createElement("svg", _extends({}, p, {
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "2",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M12 20h9"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"
+  })),
+  trash: p => /*#__PURE__*/React.createElement("svg", _extends({}, p, {
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "2",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M3 6h18"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M8 6V4h8v2"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M19 6l-1 14H6L5 6"
+  })),
+  image: p => /*#__PURE__*/React.createElement("svg", _extends({}, p, {
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.8",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }), /*#__PURE__*/React.createElement("rect", {
+    x: "3",
+    y: "3",
+    width: "18",
+    height: "18",
+    rx: "3"
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: "9",
+    cy: "9",
+    r: "2"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "m21 15-5-5L5 21"
+  })),
+  up: p => /*#__PURE__*/React.createElement("svg", _extends({}, p, {
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "2.2",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "m18 15-6-6-6 6"
+  })),
+  down: p => /*#__PURE__*/React.createElement("svg", _extends({}, p, {
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "2.2",
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "m6 9 6 6 6-6"
+  }))
+};
+
+// ---------------- UI helpers ----------------
+function Toggle({
+  checked,
+  onChange,
+  title
+}) {
+  return /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    title: title,
+    onClick: e => {
+      e.stopPropagation();
+      onChange(!checked);
+    },
+    className: `w-10 h-6 rounded-full relative transition shrink-0 ${checked ? "bg-green-600" : "bg-gray-300"}`
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "absolute top-1 w-4 h-4 bg-white rounded-full transition-all shadow",
+    style: {
+      right: checked ? "20px" : "4px"
+    }
+  }));
+}
+function Modal({
+  title,
+  onClose,
+  children,
+  footer
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center sm:p-4 fade-in",
+    onClick: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bg-white w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl max-h-[92vh] flex flex-col pop-in",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "px-5 py-4 border-b border-line flex items-center justify-between"
+  }, /*#__PURE__*/React.createElement("h3", {
+    className: "font-extrabold text-maroon text-lg"
+  }, title), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    className: "w-8 h-8 rounded-full border border-line text-gray-500 hover:bg-gray-50"
+  }, "\u2715")), /*#__PURE__*/React.createElement("div", {
+    className: "p-5 overflow-y-auto flex-1"
+  }, children), footer && /*#__PURE__*/React.createElement("div", {
+    className: "px-5 py-4 border-t border-line flex gap-2"
+  }, footer)));
+}
+function ImageUploader({
+  value,
+  onChange,
+  aspect,
+  label
+}) {
+  const [dragOver, setDragOver] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const inputRef = useRef(null);
+  async function handleFile(file) {
+    if (!file || !file.type.startsWith("image/")) {
+      setError("من فضلك اختر ملف صورة");
+      return;
+    }
+    setError("");
+    setUploading(true);
+    try {
+      onChange(await API.uploadImage(file));
+    } catch (err) {
+      setError("تعذر رفع الصورة: " + err.message);
+    } finally {
+      setUploading(false);
+    }
+  }
+  return /*#__PURE__*/React.createElement("div", null, label && /*#__PURE__*/React.createElement("label", {
+    className: "text-xs font-bold text-brown-muted mb-1 block"
+  }, label), /*#__PURE__*/React.createElement("div", {
+    onClick: () => !uploading && inputRef.current && inputRef.current.click(),
+    onDragOver: e => {
+      e.preventDefault();
+      setDragOver(true);
+    },
+    onDragLeave: () => setDragOver(false),
+    onDrop: e => {
+      e.preventDefault();
+      setDragOver(false);
+      const f = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) handleFile(f);
+    },
+    className: `relative w-full ${aspect === "wide" ? "aspect-[16/6]" : "aspect-[4/3]"} rounded-2xl overflow-hidden cursor-pointer border-2 border-dashed transition ${dragOver ? "border-maroon drag-over" : "border-line bg-cream"}`
+  }, value ? /*#__PURE__*/React.createElement("img", {
+    src: value,
+    alt: "",
+    className: "w-full h-full object-cover"
+  }) : /*#__PURE__*/React.createElement("div", {
+    className: "w-full h-full flex flex-col items-center justify-center gap-2 text-brown-muted"
+  }, /*#__PURE__*/React.createElement(Icon.image, {
+    className: "w-9 h-9 opacity-50"
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "text-xs font-bold"
+  }, "\u0627\u0633\u062D\u0628 \u0627\u0644\u0635\u0648\u0631\u0629 \u0647\u0646\u0627 \u0623\u0648 \u062F\u0648\u0633 \u0644\u0644\u0627\u062E\u062A\u064A\u0627\u0631"), /*#__PURE__*/React.createElement("span", {
+    className: "text-[10px] opacity-70"
+  }, "\u0628\u062A\u062A\u0631\u0641\u0639 \u0639\u0644\u0649 \u062C\u0648\u062C\u0644 \u062F\u0631\u0627\u064A\u0641 \u062A\u0644\u0642\u0627\u0626\u064A")), uploading && /*#__PURE__*/React.createElement("div", {
+    className: "absolute inset-0 bg-black/55 flex flex-col items-center justify-center gap-2"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "w-8 h-8 border-4 border-white/30 border-t-white rounded-full animate-spin"
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "text-white text-xs font-bold"
+  }, "\u062C\u0627\u0631\u0650 \u0627\u0644\u0631\u0641\u0639 \u0639\u0644\u0649 \u0627\u0644\u062F\u0631\u0627\u064A\u0641...")), value && !uploading && /*#__PURE__*/React.createElement("div", {
+    className: "absolute inset-0 bg-black/0 hover:bg-black/40 transition flex items-center justify-center opacity-0 hover:opacity-100"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-white text-xs font-bold"
+  }, "\u062F\u0648\u0633 \u0623\u0648 \u0627\u0633\u062D\u0628 \u0644\u062A\u063A\u064A\u064A\u0631 \u0627\u0644\u0635\u0648\u0631\u0629")), /*#__PURE__*/React.createElement("input", {
+    ref: inputRef,
+    type: "file",
+    accept: "image/*",
+    className: "hidden",
+    onChange: e => {
+      const f = e.target.files && e.target.files[0];
+      if (f) handleFile(f);
+      e.target.value = "";
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between mt-1"
+  }, error ? /*#__PURE__*/React.createElement("p", {
+    className: "text-red-600 text-[11px] font-bold"
+  }, error) : /*#__PURE__*/React.createElement("span", null), value && !uploading && /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => onChange(""),
+    className: "text-[11px] text-red-600 font-bold"
+  }, "\u0625\u0632\u0627\u0644\u0629 \u0627\u0644\u0635\u0648\u0631\u0629")));
+}
+function reorderList(list, fromId, toId) {
+  const sorted = [...list].sort((a, b) => a.order - b.order);
+  const fromIdx = sorted.findIndex(x => x.id === fromId);
+  const toIdx = sorted.findIndex(x => x.id === toId);
+  if (fromIdx === -1 || toIdx === -1) return sorted;
+  const [moved] = sorted.splice(fromIdx, 1);
+  sorted.splice(toIdx, 0, moved);
+  return sorted.map((x, i) => ({
+    ...x,
+    order: i + 1
+  }));
+}
+function moveBy(list, id, delta) {
+  const sorted = [...list].sort((a, b) => a.order - b.order);
+  const i = sorted.findIndex(x => x.id === id);
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= sorted.length) return null;
+  [sorted[i], sorted[j]] = [sorted[j], sorted[i]];
+  return sorted.map((x, k) => ({
+    ...x,
+    order: k + 1
+  }));
+}
+
+// ---------------- تسجيل الدخول ----------------
+function LoginScreen({
+  onSuccess
+}) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  async function submit(e) {
+    e && e.preventDefault();
+    if (!password) return;
+    setLoading(true);
+    setError("");
+    try {
+      const res = await API.post("login", {
+        password
+      }, 0);
+      API.setToken(res.token);
+      onSuccess();
+    } catch (err) {
+      setError(/كلمة المرور/.test(err.message) ? err.message : "تعذر الاتصال بالسيرفر: " + err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    className: "min-h-screen flex items-center justify-center p-4",
+    style: {
+      backgroundImage: "radial-gradient(#e8dbce 1px, transparent 1px)",
+      backgroundSize: "20px 20px"
+    }
+  }, /*#__PURE__*/React.createElement("form", {
+    onSubmit: submit,
+    className: "bg-white rounded-2xl w-full max-w-sm p-6 shadow-xl border-t-4 border-maroon pop-in"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-2 mb-1"
+  }, /*#__PURE__*/React.createElement("svg", {
+    viewBox: "0 0 24 24",
+    className: "w-7 h-7 fill-maroon"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M12 2L2 22h20L12 2zm0 3.8l7.1 14.2H4.9L12 5.8z"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M12 10l-4 8h8l-4-8z"
+  })), /*#__PURE__*/React.createElement("h1", {
+    className: "font-black text-xl text-maroon"
+  }, "\u0644\u0648\u062D\u0629 \u062A\u062D\u0643\u0645 \u0647\u0631\u0645 \u0627\u0644\u0641\u0637\u064A\u0631")), /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-brown-muted mb-5"
+  }, "\u0644\u0635\u0627\u062D\u0628 \u0627\u0644\u0645\u0637\u0639\u0645 \u0641\u0642\u0637"), /*#__PURE__*/React.createElement("input", {
+    type: "password",
+    autoFocus: true,
+    value: password,
+    onChange: e => setPassword(e.target.value),
+    placeholder: "\u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631",
+    className: "w-full border border-line rounded-xl p-3 text-sm mb-2 focus:border-maroon outline-none",
+    dir: "ltr"
+  }), error && /*#__PURE__*/React.createElement("p", {
+    className: "text-red-600 text-xs font-bold mb-2"
+  }, error), /*#__PURE__*/React.createElement("button", {
+    disabled: loading,
+    className: "w-full bg-maroon hover:bg-maroon-dark disabled:opacity-60 text-white rounded-xl py-3 font-bold mt-2"
+  }, loading ? "جارِ الدخول..." : "دخول"), /*#__PURE__*/React.createElement("a", {
+    href: "index.html",
+    className: "block text-center text-xs text-brown-muted mt-4 hover:text-maroon"
+  }, "\u2190 \u0627\u0644\u0631\u062C\u0648\u0639 \u0644\u0644\u0645\u0646\u064A\u0648")));
+}
+
+// ---------------- نظرة عامة ----------------
+function isSameDay(a, b) {
+  return a.toDateString() === b.toDateString();
+}
+function Overview({
+  orders,
+  ordersError,
+  items,
+  categories,
+  currency
+}) {
+  const now = new Date();
+  const valid = orders.filter(o => o.status !== "ملغي");
+  const today = valid.filter(o => isSameDay(new Date(o.createdAt), now));
+  const week = valid.filter(o => {
+    const d = (now - new Date(o.createdAt)) / 864e5;
+    return d >= 0 && d <= 7;
+  });
+  const sum = l => l.reduce((s, o) => s + (Number(o.total) || 0), 0);
+  const counts = {};
+  valid.forEach(o => String(o.itemsSummary || "").split("،").forEach(seg => {
+    const [name, qty] = seg.split("×").map(s => (s || "").trim());
+    if (name) counts[name] = (counts[name] || 0) + (parseInt(qty) || 1);
+  }));
+  const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const max = top.length ? top[0][1] : 1;
+  const noImage = items.filter(i => !i.image).length;
+  const cards = [{
+    label: "طلبات النهارده",
+    value: today.length
+  }, {
+    label: "مبيعات النهارده",
+    value: `${sum(today)} ${currency}`
+  }, {
+    label: "مبيعات آخر 7 أيام",
+    value: `${sum(week)} ${currency}`
+  }, {
+    label: "الأصناف / الأقسام",
+    value: `${items.length} / ${categories.length}`
+  }];
+  return /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col gap-4"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 lg:grid-cols-4 gap-3"
+  }, cards.map(c => /*#__PURE__*/React.createElement("div", {
+    key: c.label,
+    className: "bg-white rounded-2xl border border-line p-4"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-brown-muted mb-1 font-bold"
+  }, c.label), /*#__PURE__*/React.createElement("p", {
+    className: "text-xl font-black text-maroon"
+  }, c.value)))), noImage > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "bg-amber-50 border border-amber-200 text-amber-800 rounded-2xl p-3 text-sm font-bold"
+  }, "\uD83D\uDCF7 \u0641\u064A\u0647 ", noImage, " \u0635\u0646\u0641 \u0644\u0633\u0647 \u0645\u0646 \u063A\u064A\u0631 \u0635\u0648\u0631\u0629 \u2014 \u062A\u0642\u062F\u0631 \u062A\u0636\u064A\u0641 \u0627\u0644\u0635\u0648\u0631 \u0645\u0646 \u062A\u0628\u0648\u064A\u0628 \"\u0627\u0644\u0645\u0646\u064A\u0648\"."), /*#__PURE__*/React.createElement("div", {
+    className: "bg-white rounded-2xl border border-line p-4"
+  }, /*#__PURE__*/React.createElement("h3", {
+    className: "font-extrabold text-maroon mb-3"
+  }, "\u0627\u0644\u0623\u0643\u062B\u0631 \u0637\u0644\u0628\u064B\u0627"), ordersError && /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-red-600"
+  }, ordersError), !ordersError && top.length === 0 && /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-brown-muted"
+  }, "\u0644\u0633\u0647 \u0645\u0641\u064A\u0634 \u0637\u0644\u0628\u0627\u062A \u0645\u062A\u0633\u062C\u0644\u0629. \u0627\u0644\u0637\u0644\u0628\u0627\u062A \u0628\u062A\u062A\u0633\u062C\u0644 \u062A\u0644\u0642\u0627\u0626\u064A \u0644\u0645\u0627 \u0627\u0644\u0639\u0645\u064A\u0644 \u064A\u0628\u0639\u062A \u0627\u0644\u0637\u0644\u0628 \u0639\u0644\u0649 \u0627\u0644\u0648\u0627\u062A\u0633\u0627\u0628."), /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col gap-2"
+  }, top.map(([name, count]) => /*#__PURE__*/React.createElement("div", {
+    key: name,
+    className: "flex items-center gap-3"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-xs w-40 truncate font-bold"
+  }, name), /*#__PURE__*/React.createElement("div", {
+    className: "flex-1 bg-cream rounded-full h-2.5 overflow-hidden"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bg-maroon h-full rounded-full",
+    style: {
+      width: `${count / max * 100}%`
+    }
+  })), /*#__PURE__*/React.createElement("span", {
+    className: "text-xs text-brown-muted w-6 text-left"
+  }, count))))));
+}
+
+// ---------------- الطلبات ----------------
+const STATUSES = ["جديد", "تم التنفيذ", "ملغي"];
+function Orders({
+  orders,
+  setOrders,
+  currency,
+  onRefresh,
+  loading
+}) {
+  async function setStatus(o, status) {
+    const prev = orders;
+    setOrders(orders.map(x => x.id === o.id ? {
+      ...x,
+      status
+    } : x));
+    try {
+      await API.post("updateOrderStatus", {
+        orderId: o.id,
+        status
+      });
+    } catch (err) {
+      alert("تعذر تحديث الحالة: " + err.message);
+      setOrders(prev);
+    }
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col gap-3"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-brown-muted font-bold"
+  }, "\u0622\u062E\u0631 ", orders.length, " \u0637\u0644\u0628"), /*#__PURE__*/React.createElement("button", {
+    onClick: onRefresh,
+    className: "text-xs border border-line bg-white rounded-full px-3 py-1.5 font-bold"
+  }, loading ? "..." : "تحديث ↻")), orders.length === 0 && /*#__PURE__*/React.createElement("div", {
+    className: "bg-white rounded-2xl border border-line p-6 text-center text-sm text-brown-muted"
+  }, "\u0644\u0627 \u062A\u0648\u062C\u062F \u0637\u0644\u0628\u0627\u062A \u0628\u0639\u062F"), orders.slice(0, 100).map(o => /*#__PURE__*/React.createElement("div", {
+    key: o.id,
+    className: "bg-white rounded-2xl border border-line p-4"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-start justify-between gap-2"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    className: "font-extrabold text-sm"
+  }, o.orderType, " ", o.customerName && `— ${o.customerName}`), /*#__PURE__*/React.createElement("p", {
+    className: "text-[11px] text-brown-muted",
+    dir: "ltr",
+    style: {
+      textAlign: "right"
+    }
+  }, new Date(o.createdAt).toLocaleString("ar-EG"), " \xB7 ", o.id)), /*#__PURE__*/React.createElement("p", {
+    className: "font-black text-maroon whitespace-nowrap"
+  }, o.total, " ", currency)), /*#__PURE__*/React.createElement("p", {
+    className: "text-xs mt-2 leading-6"
+  }, o.itemsSummary), (o.phone || o.address || o.tableNumber || o.notes) && /*#__PURE__*/React.createElement("p", {
+    className: "text-[11px] text-brown-muted mt-1"
+  }, [o.phone && `📞 ${o.phone}`, o.address && `📍 ${o.address}`, o.tableNumber && `طاولة ${o.tableNumber}`, o.notes && `ملاحظات: ${o.notes}`].filter(Boolean).join(" · ")), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-1.5 mt-3"
+  }, STATUSES.map(s => /*#__PURE__*/React.createElement("button", {
+    key: s,
+    onClick: () => setStatus(o, s),
+    className: `text-[11px] px-3 py-1 rounded-full font-bold border ${o.status === s ? s === "ملغي" ? "bg-red-600 text-white border-red-600" : s === "جديد" ? "bg-gold text-white border-gold" : "bg-green-600 text-white border-green-600" : "border-line text-brown-muted"}`
+  }, s))))));
+}
+
+// ---------------- الأقسام والأصناف ----------------
+function CategoryEditor({
+  value,
+  onSave,
+  onClose
+}) {
+  const [cat, setCat] = useState(value);
+  const icons = ["🍕", "🥧", "🌮", "🥙", "🌯", "🥖", "🍝", "🍟", "🥞", "🍯", "🥤", "🍔", "🍗", "🥗", "🍰", "🍽️"];
+  return /*#__PURE__*/React.createElement(Modal, {
+    title: cat.id ? "تعديل القسم" : "قسم جديد",
+    onClose: onClose,
+    footer: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
+      onClick: () => cat.name.trim() && onSave(cat),
+      className: "flex-1 bg-maroon text-white rounded-xl py-2.5 font-bold"
+    }, "\u062D\u0641\u0638"), /*#__PURE__*/React.createElement("button", {
+      onClick: onClose,
+      className: "flex-1 border border-line rounded-xl py-2.5 font-bold"
+    }, "\u0625\u0644\u063A\u0627\u0621"))
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col gap-3"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    className: "text-xs font-bold text-brown-muted mb-1 block"
+  }, "\u0627\u0633\u0645 \u0627\u0644\u0642\u0633\u0645"), /*#__PURE__*/React.createElement("input", {
+    autoFocus: true,
+    value: cat.name,
+    onChange: e => setCat({
+      ...cat,
+      name: e.target.value
+    }),
+    className: "w-full border border-line rounded-xl p-2.5 text-sm",
+    placeholder: "\u0645\u062B\u0627\u0644: \u0627\u0644\u0641\u0637\u064A\u0631 \u0627\u0644\u062D\u0627\u062F\u0642"
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    className: "text-xs font-bold text-brown-muted mb-1 block"
+  }, "\u0627\u0644\u0623\u064A\u0642\u0648\u0646\u0629"), /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-wrap gap-1.5"
+  }, icons.map(ic => /*#__PURE__*/React.createElement("button", {
+    key: ic,
+    type: "button",
+    onClick: () => setCat({
+      ...cat,
+      icon: ic
+    }),
+    className: `w-9 h-9 rounded-lg text-lg border ${cat.icon === ic ? "border-maroon bg-red-50" : "border-line"}`
+  }, ic)))), /*#__PURE__*/React.createElement(ImageUploader, {
+    label: "\u0628\u0627\u0646\u0631 \u0627\u0644\u0642\u0633\u0645 (\u0635\u0648\u0631\u0629 \u0639\u0631\u064A\u0636\u0629 \u062A\u0638\u0647\u0631 \u0641\u0648\u0642 \u0623\u0635\u0646\u0627\u0641 \u0627\u0644\u0642\u0633\u0645 \u2014 \u0627\u062E\u062A\u064A\u0627\u0631\u064A)",
+    aspect: "wide",
+    value: cat.bannerImage,
+    onChange: url => setCat(c => ({
+      ...c,
+      bannerImage: url
+    }))
+  }), /*#__PURE__*/React.createElement("label", {
+    className: "flex items-center gap-2 text-sm font-bold"
+  }, /*#__PURE__*/React.createElement(Toggle, {
+    checked: cat.active,
+    onChange: v => setCat({
+      ...cat,
+      active: v
+    })
+  }), " \u0627\u0644\u0642\u0633\u0645 \u0638\u0627\u0647\u0631 \u0644\u0644\u0639\u0645\u0644\u0627\u0621")));
+}
+const SIZE_PRESETS = [{
+  label: "سعر واحد",
+  sizes: [""]
+}, {
+  label: "M / L",
+  sizes: ["M", "L"]
+}, {
+  label: "S / M / L / XL",
+  sizes: ["S", "M", "L", "XL"]
+}];
+function ItemEditor({
+  value,
+  categories,
+  currency,
+  onSave,
+  onClose
+}) {
+  const [it, setIt] = useState(() => ({
+    ...value,
+    sizes: value.sizes && value.sizes.length ? value.sizes.map(s => ({
+      ...s
+    })) : [{
+      label: "",
+      price: ""
+    }]
+  }));
+  const [err, setErr] = useState("");
+  function setSize(i, field, v) {
+    setIt(p => {
+      const sizes = p.sizes.map((s, k) => k === i ? {
+        ...s,
+        [field]: v
+      } : s);
+      return {
+        ...p,
+        sizes
+      };
+    });
+  }
+  function applyPreset(labels) {
+    setIt(p => ({
+      ...p,
+      sizes: labels.map((l, i) => ({
+        label: l,
+        price: p.sizes[i] && p.sizes[i].price || ""
+      }))
+    }));
+  }
+  function save() {
+    if (!it.name.trim()) {
+      setErr("اكتب اسم الصنف");
+      return;
+    }
+    const sizes = it.sizes.map(s => ({
+      label: String(s.label || "").trim(),
+      price: hfToNumber(s.price)
+    })).filter(s => !isNaN(s.price));
+    if (!sizes.length) {
+      setErr("اكتب السعر");
+      return;
+    }
+    if (sizes.length > 1 && sizes.some(s => !s.label)) {
+      setErr("لما يكون فيه أكتر من حجم، لازم كل حجم يكون له اسم (S / M / L...)");
+      return;
+    }
+    onSave({
+      ...it,
+      name: it.name.trim(),
+      description: (it.description || "").trim(),
+      sizes
+    });
+  }
+  return /*#__PURE__*/React.createElement(Modal, {
+    title: it.id ? "تعديل الصنف" : "صنف جديد",
+    onClose: onClose,
+    footer: /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
+      onClick: save,
+      className: "flex-1 bg-maroon text-white rounded-xl py-2.5 font-bold"
+    }, "\u062D\u0641\u0638"), /*#__PURE__*/React.createElement("button", {
+      onClick: onClose,
+      className: "flex-1 border border-line rounded-xl py-2.5 font-bold"
+    }, "\u0625\u0644\u063A\u0627\u0621"))
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col gap-3"
+  }, /*#__PURE__*/React.createElement(ImageUploader, {
+    label: "\u0635\u0648\u0631\u0629 \u0627\u0644\u0635\u0646\u0641",
+    value: it.image,
+    onChange: url => setIt(p => ({
+      ...p,
+      image: url
+    }))
+  }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    className: "text-xs font-bold text-brown-muted mb-1 block"
+  }, "\u0627\u0633\u0645 \u0627\u0644\u0635\u0646\u0641"), /*#__PURE__*/React.createElement("input", {
+    value: it.name,
+    onChange: e => setIt({
+      ...it,
+      name: e.target.value
+    }),
+    className: "w-full border border-line rounded-xl p-2.5 text-sm",
+    placeholder: "\u0645\u062B\u0627\u0644: \u062A\u0634\u0643\u064A\u0646 \u0631\u0627\u0646\u0634"
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    className: "text-xs font-bold text-brown-muted mb-1 block"
+  }, "\u0627\u0644\u0645\u0643\u0648\u0646\u0627\u062A / \u0627\u0644\u0648\u0635\u0641 (\u0627\u062E\u062A\u064A\u0627\u0631\u064A)"), /*#__PURE__*/React.createElement("textarea", {
+    value: it.description,
+    onChange: e => setIt({
+      ...it,
+      description: e.target.value
+    }),
+    rows: 2,
+    className: "w-full border border-line rounded-xl p-2.5 text-sm",
+    placeholder: "\u0641\u0631\u0627\u062E - \u0641\u0644\u0641\u0644 - \u0637\u0645\u0627\u0637\u0645 - \u0632\u064A\u062A\u0648\u0646 - \u0645\u0648\u0632\u0627\u0631\u064A\u0644\u0627"
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    className: "text-xs font-bold text-brown-muted mb-1 block"
+  }, "\u0627\u0644\u0642\u0633\u0645"), /*#__PURE__*/React.createElement("select", {
+    value: it.categoryId,
+    onChange: e => setIt({
+      ...it,
+      categoryId: e.target.value
+    }),
+    className: "w-full border border-line rounded-xl p-2.5 text-sm bg-white"
+  }, categories.map(c => /*#__PURE__*/React.createElement("option", {
+    key: c.id,
+    value: c.id
+  }, c.icon, " ", c.name)))), /*#__PURE__*/React.createElement("div", {
+    className: "border border-line rounded-xl p-3 bg-cream"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between mb-2 flex-wrap gap-2"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "text-xs font-bold text-brown-muted"
+  }, "\u0627\u0644\u0623\u062D\u062C\u0627\u0645 \u0648\u0627\u0644\u0623\u0633\u0639\u0627\u0631 (", currency, ")"), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-1"
+  }, SIZE_PRESETS.map(p => /*#__PURE__*/React.createElement("button", {
+    key: p.label,
+    type: "button",
+    onClick: () => applyPreset(p.sizes),
+    className: "text-[10px] bg-white border border-line rounded-full px-2 py-1 font-bold"
+  }, p.label)))), /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col gap-2"
+  }, it.sizes.map((s, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    className: "flex gap-2 items-center"
+  }, /*#__PURE__*/React.createElement("input", {
+    value: s.label,
+    onChange: e => setSize(i, "label", e.target.value),
+    placeholder: it.sizes.length === 1 ? "(سعر واحد)" : "الحجم",
+    className: "w-28 border border-line rounded-lg p-2 text-sm bg-white"
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    inputMode: "decimal",
+    value: s.price,
+    onChange: e => setSize(i, "price", e.target.value),
+    placeholder: "\u0627\u0644\u0633\u0639\u0631",
+    className: "flex-1 border border-line rounded-lg p-2 text-sm bg-white",
+    dir: "ltr"
+  }), it.sizes.length > 1 && /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setIt(p => ({
+      ...p,
+      sizes: p.sizes.filter((_, k) => k !== i)
+    })),
+    className: "text-red-400 hover:text-red-600"
+  }, /*#__PURE__*/React.createElement(Icon.trash, {
+    className: "w-4 h-4"
+  }))))), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setIt(p => ({
+      ...p,
+      sizes: [...p.sizes, {
+        label: "",
+        price: ""
+      }]
+    })),
+    className: "text-xs text-maroon font-bold mt-2"
+  }, "+ \u0625\u0636\u0627\u0641\u0629 \u062D\u062C\u0645")), /*#__PURE__*/React.createElement("label", {
+    className: "flex items-center gap-2 text-sm font-bold"
+  }, /*#__PURE__*/React.createElement(Toggle, {
+    checked: it.available,
+    onChange: v => setIt({
+      ...it,
+      available: v
+    })
+  }), " \u0645\u062A\u0627\u062D \u0644\u0644\u0637\u0644\u0628"), err && /*#__PURE__*/React.createElement("p", {
+    className: "text-red-600 text-xs font-bold"
+  }, err)));
+}
+function MenuManager({
+  categories,
+  setCategories,
+  items,
+  setItems,
+  currency,
+  reload
+}) {
+  const [selectedCat, setSelectedCat] = useState(categories[0] ? categories[0].id : null);
+  const [editingCat, setEditingCat] = useState(null);
+  const [editingItem, setEditingItem] = useState(null);
+  const [dragCat, setDragCat] = useState(null);
+  const [dragItem, setDragItem] = useState(null);
+  const [saving, setSaving] = useState(0);
+  const [search, setSearch] = useState("");
+  const sortedCats = [...categories].sort((a, b) => a.order - b.order);
+  const countByCat = useMemo(() => {
+    const m = {};
+    items.forEach(i => {
+      m[i.categoryId] = (m[i.categoryId] || 0) + 1;
+    });
+    return m;
+  }, [items]);
+
+  // كل تعديل = عملية واحدة على السيرفر (مش استبدال للقائمة كلها).
+  // بنعرض التعديل فورًا، وبعدين بناخد الحالة الحقيقية من الشيت اللي السيرفر بيرجّعها.
+  const seqRef = useRef(0);
+  async function mutate(action, payload, optimistic) {
+    if (optimistic) {
+      if (optimistic.categories) setCategories(optimistic.categories);
+      if (optimistic.items) setItems(optimistic.items);
+    }
+    const seq = ++seqRef.current;
+    setSaving(n => n + 1);
+    try {
+      const res = await API.post(action, payload);
+      if (seq === seqRef.current) {
+        const d = hfNormalize({
+          categories: res.categories,
+          items: res.items
+        });
+        setCategories(d.categories);
+        setItems(d.items);
+      }
+    } catch (err) {
+      alert("تعذر الحفظ: " + err.message);
+      reload();
+    } finally {
+      setSaving(n => n - 1);
+    }
+  }
+
+  // ---- أقسام ----
+  function saveCategory(cat) {
+    if (cat.id) {
+      mutate("upsertCategory", {
+        category: cat
+      }, {
+        categories: categories.map(c => c.id === cat.id ? {
+          ...c,
+          ...cat
+        } : c)
+      });
+    } else {
+      const id = "c" + Date.now().toString(36);
+      const nc = {
+        ...cat,
+        id,
+        order: categories.length + 1
+      };
+      mutate("upsertCategory", {
+        category: nc
+      }, {
+        categories: [...categories, nc]
+      });
+      setSelectedCat(id);
+    }
+    setEditingCat(null);
+  }
+  function setCategoryActive(c, v) {
+    mutate("upsertCategory", {
+      category: {
+        id: c.id,
+        name: c.name,
+        active: v
+      }
+    }, {
+      categories: categories.map(x => x.id === c.id ? {
+        ...x,
+        active: v
+      } : x)
+    });
+  }
+  function reorderCategories(list) {
+    mutate("reorderCategories", {
+      ids: list.map(c => c.id)
+    }, {
+      categories: list
+    });
+  }
+  function deleteCategory(c) {
+    const n = countByCat[c.id] || 0;
+    if (!confirm(`حذف قسم "${c.name}"؟${n ? `\nهيتحذف معاه ${n} صنف.` : ""}`)) return;
+    mutate("deleteCategory", {
+      id: c.id
+    }, {
+      categories: categories.filter(x => x.id !== c.id),
+      items: items.filter(i => i.categoryId !== c.id)
+    });
+    if (selectedCat === c.id) setSelectedCat(null);
+  }
+
+  // ---- أصناف ----
+  const q = search.trim().toLowerCase();
+  const visibleItems = q ? items.filter(i => i.name.toLowerCase().includes(q) || i.description.toLowerCase().includes(q)) : items.filter(i => i.categoryId === selectedCat).sort((a, b) => a.order - b.order);
+  function saveItem(it) {
+    const exists = it.id && items.some(x => x.id === it.id);
+    const payloadItem = {
+      id: it.id,
+      categoryId: it.categoryId,
+      name: it.name,
+      description: it.description,
+      sizes: it.sizes,
+      image: it.image,
+      available: it.available
+    };
+    if (exists) {
+      mutate("upsertItem", {
+        item: payloadItem
+      }, {
+        items: items.map(x => x.id === it.id ? {
+          ...x,
+          ...payloadItem
+        } : x)
+      });
+    } else {
+      const id = "i" + Date.now().toString(36);
+      const order = items.filter(x => x.categoryId === it.categoryId).reduce((m, x) => Math.max(m, x.order), 0) + 1;
+      mutate("upsertItem", {
+        item: {
+          ...payloadItem,
+          id
+        }
+      }, {
+        items: [...items, {
+          ...payloadItem,
+          id,
+          order
+        }]
+      });
+    }
+    setEditingItem(null);
+  }
+  function setItemAvailable(it, v) {
+    mutate("upsertItem", {
+      item: {
+        id: it.id,
+        available: v
+      }
+    }, {
+      items: items.map(x => x.id === it.id ? {
+        ...x,
+        available: v
+      } : x)
+    });
+  }
+  function reorderItems(newCatList) {
+    const map = {};
+    newCatList.forEach(x => {
+      map[x.id] = x.order;
+    });
+    mutate("reorderItems", {
+      categoryId: newCatList[0] && newCatList[0].categoryId,
+      ids: newCatList.map(x => x.id)
+    }, {
+      items: items.map(x => x.id in map ? {
+        ...x,
+        order: map[x.id]
+      } : x)
+    });
+  }
+  function deleteItem(it) {
+    if (!confirm(`حذف "${it.name}"؟`)) return;
+    mutate("deleteItem", {
+      id: it.id
+    }, {
+      items: items.filter(x => x.id !== it.id)
+    });
+  }
+  const catName = id => (categories.find(c => c.id === id) || {}).name || "";
+  const priceText = it => it.sizes.map(s => s.label ? `${s.label} ${s.price}` : s.price).join(" · ");
+  return /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-4 items-start"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bg-white rounded-2xl border border-line p-3 lg:sticky lg:top-4"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between mb-3 px-1"
+  }, /*#__PURE__*/React.createElement("h3", {
+    className: "font-extrabold text-maroon"
+  }, "\u0627\u0644\u0623\u0642\u0633\u0627\u0645"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEditingCat({
+      name: "",
+      icon: "🍽️",
+      bannerImage: "",
+      active: true
+    }),
+    className: "text-xs bg-maroon text-white rounded-full px-3 py-1.5 font-bold"
+  }, "+ \u0642\u0633\u0645")), /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col gap-1.5"
+  }, sortedCats.map(c => /*#__PURE__*/React.createElement("div", {
+    key: c.id,
+    draggable: true,
+    onDragStart: () => setDragCat(c.id),
+    onDragOver: e => e.preventDefault(),
+    onDrop: () => {
+      if (dragCat && dragCat !== c.id) reorderCategories(reorderList(categories, dragCat, c.id));
+      setDragCat(null);
+    },
+    onClick: () => {
+      setSelectedCat(c.id);
+      setSearch("");
+    },
+    className: `flex items-center gap-2 border rounded-xl p-2 cursor-pointer transition ${selectedCat === c.id && !q ? "border-maroon bg-red-50" : "border-line hover:bg-cream"} ${c.active ? "" : "opacity-60"}`
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-gray-300 cursor-grab hidden sm:block"
+  }, /*#__PURE__*/React.createElement(Icon.drag, {
+    className: "w-4 h-4"
+  })), c.bannerImage ? /*#__PURE__*/React.createElement("img", {
+    src: c.bannerImage,
+    className: "w-9 h-9 rounded-lg object-cover",
+    alt: ""
+  }) : /*#__PURE__*/React.createElement("span", {
+    className: "w-9 h-9 rounded-lg bg-cream flex items-center justify-center text-lg"
+  }, c.icon || "🍽️"), /*#__PURE__*/React.createElement("div", {
+    className: "flex-1 min-w-0"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-sm font-bold truncate"
+  }, c.name), /*#__PURE__*/React.createElement("p", {
+    className: "text-[10px] text-brown-muted"
+  }, countByCat[c.id] || 0, " \u0635\u0646\u0641", c.active ? "" : " · مخفي")), /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col sm:hidden"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: e => {
+      e.stopPropagation();
+      const l = moveBy(categories, c.id, -1);
+      l && reorderCategories(l);
+    },
+    className: "text-gray-400"
+  }, /*#__PURE__*/React.createElement(Icon.up, {
+    className: "w-4 h-4"
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: e => {
+      e.stopPropagation();
+      const l = moveBy(categories, c.id, 1);
+      l && reorderCategories(l);
+    },
+    className: "text-gray-400"
+  }, /*#__PURE__*/React.createElement(Icon.down, {
+    className: "w-4 h-4"
+  }))), /*#__PURE__*/React.createElement("button", {
+    onClick: e => {
+      e.stopPropagation();
+      setEditingCat({
+        ...c
+      });
+    },
+    className: "text-gray-400 hover:text-maroon p-1"
+  }, /*#__PURE__*/React.createElement(Icon.edit, {
+    className: "w-4 h-4"
+  })), /*#__PURE__*/React.createElement(Toggle, {
+    checked: c.active,
+    title: "\u0625\u0638\u0647\u0627\u0631/\u0625\u062E\u0641\u0627\u0621",
+    onChange: v => setCategoryActive(c, v)
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: e => {
+      e.stopPropagation();
+      deleteCategory(c);
+    },
+    className: "text-red-300 hover:text-red-600 p-1"
+  }, /*#__PURE__*/React.createElement(Icon.trash, {
+    className: "w-4 h-4"
+  })))), sortedCats.length === 0 && /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-brown-muted text-center py-4"
+  }, "\u0644\u0627 \u062A\u0648\u062C\u062F \u0623\u0642\u0633\u0627\u0645"))), /*#__PURE__*/React.createElement("div", {
+    className: "bg-white rounded-2xl border border-line p-3"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-2 mb-3 flex-wrap"
+  }, /*#__PURE__*/React.createElement("h3", {
+    className: "font-extrabold text-maroon flex-1 min-w-[120px]"
+  }, q ? `نتائج البحث (${visibleItems.length})` : selectedCat ? catName(selectedCat) : "الأصناف", saving > 0 && /*#__PURE__*/React.createElement("span", {
+    className: "text-[11px] text-brown-muted font-normal mr-2"
+  }, "\u062C\u0627\u0631\u0650 \u0627\u0644\u062D\u0641\u0638...")), /*#__PURE__*/React.createElement("input", {
+    value: search,
+    onChange: e => setSearch(e.target.value),
+    placeholder: "\uD83D\uDD0D \u0628\u062D\u062B \u0641\u064A \u0643\u0644 \u0627\u0644\u0623\u0635\u0646\u0627\u0641",
+    className: "border border-line rounded-full px-3 py-1.5 text-xs w-44"
+  }), selectedCat && !q && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEditingItem({
+      id: "",
+      categoryId: selectedCat,
+      name: "",
+      description: "",
+      sizes: [],
+      image: "",
+      available: true,
+      order: 0
+    }),
+    className: "text-xs bg-maroon text-white rounded-full px-3 py-1.5 font-bold"
+  }, "+ \u0635\u0646\u0641 \u062C\u062F\u064A\u062F")), !selectedCat && !q && /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-brown-muted text-center py-10"
+  }, "\u0627\u062E\u062A\u0627\u0631 \u0642\u0633\u0645 \u0639\u0644\u0634\u0627\u0646 \u062A\u062F\u064A\u0631 \u0623\u0635\u0646\u0627\u0641\u0647"), /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col gap-1.5"
+  }, (selectedCat || q) && visibleItems.map(it => /*#__PURE__*/React.createElement("div", {
+    key: it.id,
+    draggable: !q,
+    onDragStart: () => setDragItem(it.id),
+    onDragOver: e => e.preventDefault(),
+    onDrop: () => {
+      if (!q && dragItem && dragItem !== it.id) reorderItems(reorderList(visibleItems, dragItem, it.id));
+      setDragItem(null);
+    },
+    className: `flex items-center gap-2 border border-line rounded-xl p-2 ${it.available ? "" : "bg-gray-50"}`
+  }, !q && /*#__PURE__*/React.createElement("span", {
+    className: "text-gray-300 cursor-grab hidden sm:block"
+  }, /*#__PURE__*/React.createElement(Icon.drag, {
+    className: "w-4 h-4"
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEditingItem(it),
+    className: "shrink-0"
+  }, it.image ? /*#__PURE__*/React.createElement("img", {
+    src: it.image,
+    className: "w-12 h-12 rounded-lg object-cover",
+    alt: ""
+  }) : /*#__PURE__*/React.createElement("span", {
+    className: "w-12 h-12 rounded-lg bg-cream border border-dashed border-line flex items-center justify-center text-brown-muted"
+  }, /*#__PURE__*/React.createElement(Icon.image, {
+    className: "w-5 h-5 opacity-60"
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "flex-1 min-w-0 cursor-pointer",
+    onClick: () => setEditingItem(it)
+  }, /*#__PURE__*/React.createElement("p", {
+    className: `text-sm font-bold truncate ${it.available ? "" : "line-through text-gray-400"}`
+  }, it.name), /*#__PURE__*/React.createElement("p", {
+    className: "text-[11px] text-brown-muted truncate",
+    dir: "auto"
+  }, priceText(it), " ", currency, q ? ` · ${catName(it.categoryId)}` : "")), !q && /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col sm:hidden"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      const l = moveBy(visibleItems, it.id, -1);
+      l && reorderItems(l);
+    },
+    className: "text-gray-400"
+  }, /*#__PURE__*/React.createElement(Icon.up, {
+    className: "w-4 h-4"
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      const l = moveBy(visibleItems, it.id, 1);
+      l && reorderItems(l);
+    },
+    className: "text-gray-400"
+  }, /*#__PURE__*/React.createElement(Icon.down, {
+    className: "w-4 h-4"
+  }))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEditingItem(it),
+    className: "text-gray-400 hover:text-maroon p-1"
+  }, /*#__PURE__*/React.createElement(Icon.edit, {
+    className: "w-4 h-4"
+  })), /*#__PURE__*/React.createElement(Toggle, {
+    checked: it.available,
+    title: "\u0645\u062A\u0627\u062D / \u063A\u064A\u0631 \u0645\u062A\u0627\u062D",
+    onChange: v => setItemAvailable(it, v)
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => deleteItem(it),
+    className: "text-red-300 hover:text-red-600 p-1"
+  }, /*#__PURE__*/React.createElement(Icon.trash, {
+    className: "w-4 h-4"
+  })))), (selectedCat || q) && visibleItems.length === 0 && /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-brown-muted text-center py-8"
+  }, "\u0644\u0627 \u062A\u0648\u062C\u062F \u0623\u0635\u0646\u0627\u0641"))), editingCat && /*#__PURE__*/React.createElement(CategoryEditor, {
+    value: editingCat,
+    onSave: saveCategory,
+    onClose: () => setEditingCat(null)
+  }), editingItem && /*#__PURE__*/React.createElement(ItemEditor, {
+    value: editingItem,
+    categories: sortedCats,
+    currency: currency,
+    onSave: saveItem,
+    onClose: () => setEditingItem(null)
+  }));
+}
+
+// ---------------- الإعدادات ----------------
+function SettingsPanel({
+  settings,
+  setSettings
+}) {
+  const [form, setForm] = useState(settings);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [pw, setPw] = useState({
+    cur: "",
+    next: "",
+    confirm: ""
+  });
+  const [pwMsg, setPwMsg] = useState("");
+  const [pwLoading, setPwLoading] = useState(false);
+  const set = k => e => setForm({
+    ...form,
+    [k]: e.target.value
+  });
+  const flag = k => form[k] === undefined || hfToBool(form[k]);
+  async function save() {
+    setSaving(true);
+    setMsg("");
+    try {
+      const res = await API.post("saveSettings", {
+        settings: form
+      });
+      setSettings(res.settings);
+      setForm(res.settings);
+      setMsg("تم الحفظ ✅");
+    } catch (err) {
+      setMsg("تعذر الحفظ: " + err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+  async function changePass() {
+    setPwMsg("");
+    if (!pw.cur || !pw.next) {
+      setPwMsg("املأ كل الخانات");
+      return;
+    }
+    if (pw.next !== pw.confirm) {
+      setPwMsg("كلمة المرور الجديدة غير متطابقة");
+      return;
+    }
+    setPwLoading(true);
+    try {
+      await API.post("changePassword", {
+        currentPassword: pw.cur,
+        newPassword: pw.next
+      }, 0);
+      setPwMsg("تم تغيير كلمة المرور ✅");
+      setPw({
+        cur: "",
+        next: "",
+        confirm: ""
+      });
+    } catch (err) {
+      setPwMsg(err.message);
+    } finally {
+      setPwLoading(false);
+    }
+  }
+  const Field = (label, key, dir, placeholder) => /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    className: "text-xs font-bold text-brown-muted mb-1 block"
+  }, label), /*#__PURE__*/React.createElement("input", {
+    value: form[key] || "",
+    onChange: set(key),
+    dir: dir || "rtl",
+    placeholder: placeholder || "",
+    className: "w-full border border-line rounded-xl p-2.5 text-sm"
+  }));
+  return /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-1 lg:grid-cols-2 gap-4 items-start"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bg-white rounded-2xl border border-line p-4 flex flex-col gap-3"
+  }, /*#__PURE__*/React.createElement("h3", {
+    className: "font-extrabold text-maroon"
+  }, "\u0628\u064A\u0627\u0646\u0627\u062A \u0627\u0644\u0645\u0637\u0639\u0645 \u0648\u0627\u0644\u0637\u0644\u0628\u0627\u062A"), Field("اسم المطعم", "restaurantName"), Field("العملة", "currency", "rtl", "جنيه"), Field("شريط إعلان أعلى المنيو (اختياري — سيبه فاضي لإخفائه)", "announcement", "rtl", "مثال: خصم 10% على كل البيتزا النهارده"), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 gap-2"
+  }, Field("رقم واتساب 1 (بكود الدولة من غير +)", "whatsapp1", "ltr", "2010..."), Field("اسم الزرار", "whatsapp1Label"), Field("رقم واتساب 2 (اختياري)", "whatsapp2", "ltr"), Field("اسم الزرار", "whatsapp2Label")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+    className: "text-xs font-bold text-brown-muted mb-2 block"
+  }, "\u0623\u0646\u0648\u0627\u0639 \u0627\u0644\u0637\u0644\u0628 \u0627\u0644\u0645\u062A\u0627\u062D\u0629"), /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col gap-2"
+  }, [["orderDelivery", "دليفري 🛵"], ["orderTakeaway", "تيك أواي 🛍️"], ["orderDineIn", "صالة 🍽️"]].map(([k, l]) => /*#__PURE__*/React.createElement("label", {
+    key: k,
+    className: "flex items-center gap-2 text-sm font-bold"
+  }, /*#__PURE__*/React.createElement(Toggle, {
+    checked: flag(k),
+    onChange: v => setForm({
+      ...form,
+      [k]: v ? "TRUE" : "FALSE"
+    })
+  }), " ", l))))), /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col gap-4"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bg-white rounded-2xl border border-line p-4 flex flex-col gap-3"
+  }, /*#__PURE__*/React.createElement("h3", {
+    className: "font-extrabold text-maroon"
+  }, "\u0623\u0633\u0641\u0644 \u0627\u0644\u0635\u0641\u062D\u0629 (\u062A\u0648\u0627\u0635\u0644 \u0648\u0633\u0648\u0634\u064A\u0627\u0644)"), Field("رقم التليفون", "phone", "ltr"), Field("العنوان", "address"), Field("رابط خرائط جوجل", "googleMapsUrl", "ltr"), Field("فيسبوك", "facebook", "ltr"), Field("انستجرام", "instagram", "ltr"), Field("تيك توك", "tiktok", "ltr")), /*#__PURE__*/React.createElement("button", {
+    disabled: saving,
+    onClick: save,
+    className: "bg-maroon hover:bg-maroon-dark disabled:opacity-60 text-white rounded-xl py-3 font-bold"
+  }, saving ? "جارِ الحفظ..." : "حفظ الإعدادات"), msg && /*#__PURE__*/React.createElement("p", {
+    className: "text-sm font-bold text-center"
+  }, msg), /*#__PURE__*/React.createElement("div", {
+    className: "bg-white rounded-2xl border border-line p-4 flex flex-col gap-2"
+  }, /*#__PURE__*/React.createElement("h3", {
+    className: "font-extrabold text-maroon mb-1"
+  }, "\u062A\u063A\u064A\u064A\u0631 \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631"), /*#__PURE__*/React.createElement("input", {
+    type: "password",
+    value: pw.cur,
+    onChange: e => setPw({
+      ...pw,
+      cur: e.target.value
+    }),
+    placeholder: "\u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631 \u0627\u0644\u062D\u0627\u0644\u064A\u0629",
+    className: "border border-line rounded-xl p-2.5 text-sm",
+    dir: "ltr"
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "password",
+    value: pw.next,
+    onChange: e => setPw({
+      ...pw,
+      next: e.target.value
+    }),
+    placeholder: "\u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631 \u0627\u0644\u062C\u062F\u064A\u062F\u0629",
+    className: "border border-line rounded-xl p-2.5 text-sm",
+    dir: "ltr"
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "password",
+    value: pw.confirm,
+    onChange: e => setPw({
+      ...pw,
+      confirm: e.target.value
+    }),
+    placeholder: "\u062A\u0623\u0643\u064A\u062F \u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631 \u0627\u0644\u062C\u062F\u064A\u062F\u0629",
+    className: "border border-line rounded-xl p-2.5 text-sm",
+    dir: "ltr"
+  }), pwMsg && /*#__PURE__*/React.createElement("p", {
+    className: "text-xs font-bold text-maroon"
+  }, pwMsg), /*#__PURE__*/React.createElement("button", {
+    disabled: pwLoading,
+    onClick: changePass,
+    className: "border-2 border-maroon text-maroon rounded-xl py-2.5 font-bold disabled:opacity-60"
+  }, pwLoading ? "..." : "تغيير كلمة المرور"))));
+}
+
+// ---------------- اللوحة ----------------
+function Dashboard({
+  onLogout
+}) {
+  const [status, setStatus] = useState("loading");
+  const [error, setError] = useState("");
+  const [categories, setCategories] = useState([]);
+  const [items, setItems] = useState([]);
+  const [settings, setSettings] = useState({});
+  const [orders, setOrders] = useState([]);
+  const [ordersError, setOrdersError] = useState("");
+  const [ordersLoading, setOrdersLoading] = useState(false);
+  const [tab, setTab] = useState("menu");
+  const [apiWarning, setApiWarning] = useState("");
+  function load() {
+    setStatus(s => s === "ready" ? "ready" : "loading");
+    HFData.bootstrapFromApi().then(d => {
+      setCategories(d.categories);
+      setItems(d.items);
+      setSettings(d.settings);
+      setStatus("ready");
+      if (d.source !== "api") setApiWarning("تعذر الاتصال بـ Apps Script — البيانات معروضة للقراءة فقط، والحفظ مش هيشتغل. اتأكد من رابط الـ Web App في js/config.js.");else if (d.apiVersion < REQUIRED_API_VERSION) setApiWarning("كود Apps Script قديم — الصق Code.gs الجديد واعمل Deploy ← Manage deployments ← Edit ← New version.");else setApiWarning("");
+    }).catch(err => {
+      setError(err.message);
+      setStatus("error");
+    });
+  }
+  function loadOrders() {
+    setOrdersLoading(true);
+    API.getOrders().then(o => {
+      setOrders(o);
+      setOrdersError("");
+    }).catch(err => setOrdersError("تعذر تحميل الطلبات: " + err.message)).finally(() => setOrdersLoading(false));
+  }
+  useEffect(() => {
+    load();
+    loadOrders();
+  }, []);
+  const currency = settings.currency || "جنيه";
+  const tabs = [{
+    id: "menu",
+    label: "المنيو"
+  }, {
+    id: "overview",
+    label: "نظرة عامة"
+  }, {
+    id: "orders",
+    label: "الطلبات"
+  }, {
+    id: "settings",
+    label: "الإعدادات"
+  }];
+  return /*#__PURE__*/React.createElement("div", {
+    className: "min-h-screen"
+  }, /*#__PURE__*/React.createElement("header", {
+    className: "bg-white border-b-4 border-maroon sticky top-0 z-40 shadow-sm"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "max-w-6xl mx-auto px-4 py-3 flex items-center gap-3"
+  }, /*#__PURE__*/React.createElement("svg", {
+    viewBox: "0 0 24 24",
+    className: "w-7 h-7 fill-maroon shrink-0"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M12 2L2 22h20L12 2zm0 3.8l7.1 14.2H4.9L12 5.8z"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M12 10l-4 8h8l-4-8z"
+  })), /*#__PURE__*/React.createElement("h1", {
+    className: "font-black text-maroon text-lg flex-1 truncate"
+  }, "\u0644\u0648\u062D\u0629 \u062A\u062D\u0643\u0645 ", settings.restaurantName || "هرم الفطير"), /*#__PURE__*/React.createElement("span", {
+    className: "text-[10px] text-brown-muted border border-line rounded-full px-2 py-0.5",
+    title: "\u0646\u0633\u062E\u0629 \u0644\u0648\u062D\u0629 \u0627\u0644\u062A\u062D\u0643\u0645"
+  }, "v", ADMIN_VERSION), /*#__PURE__*/React.createElement("a", {
+    href: "index.html",
+    target: "_blank",
+    className: "text-xs border border-line rounded-full px-3 py-1.5 font-bold hover:bg-cream"
+  }, "\u0639\u0631\u0636 \u0627\u0644\u0645\u0646\u064A\u0648 \u2197"), /*#__PURE__*/React.createElement("button", {
+    onClick: onLogout,
+    className: "text-xs text-red-600 font-bold"
+  }, "\u062E\u0631\u0648\u062C")), /*#__PURE__*/React.createElement("div", {
+    className: "max-w-6xl mx-auto px-4 pb-2 flex gap-2 overflow-x-auto no-scrollbar"
+  }, tabs.map(t => /*#__PURE__*/React.createElement("button", {
+    key: t.id,
+    onClick: () => setTab(t.id),
+    className: `px-4 py-1.5 rounded-full text-sm font-bold shrink-0 ${tab === t.id ? "bg-maroon text-white" : "bg-cream border border-line text-brown-muted"}`
+  }, t.label)))), /*#__PURE__*/React.createElement("main", {
+    className: "max-w-6xl mx-auto px-4 py-4"
+  }, apiWarning && /*#__PURE__*/React.createElement("div", {
+    className: "bg-red-50 border border-red-200 text-red-700 rounded-2xl p-3 text-sm font-bold mb-4"
+  }, "\u26A0\uFE0F ", apiWarning), status === "loading" && /*#__PURE__*/React.createElement("p", {
+    className: "text-center text-brown-muted py-20 font-bold"
+  }, "\u062C\u0627\u0631\u0650 \u062A\u062D\u0645\u064A\u0644 \u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A \u0645\u0646 \u062C\u0648\u062C\u0644 \u0634\u064A\u062A..."), status === "error" && /*#__PURE__*/React.createElement("div", {
+    className: "text-center py-16"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-red-600 font-bold mb-2"
+  }, "\u062A\u0639\u0630\u0631 \u062A\u062D\u0645\u064A\u0644 \u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A"), /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-brown-muted mb-4"
+  }, error), /*#__PURE__*/React.createElement("button", {
+    onClick: load,
+    className: "bg-maroon text-white rounded-full px-5 py-2 text-sm font-bold"
+  }, "\u0625\u0639\u0627\u062F\u0629 \u0627\u0644\u0645\u062D\u0627\u0648\u0644\u0629")), status === "ready" && tab === "menu" && /*#__PURE__*/React.createElement(MenuManager, {
+    categories: categories,
+    setCategories: setCategories,
+    items: items,
+    setItems: setItems,
+    currency: currency,
+    reload: load
+  }), status === "ready" && tab === "overview" && /*#__PURE__*/React.createElement(Overview, {
+    orders: orders,
+    ordersError: ordersError,
+    items: items,
+    categories: categories,
+    currency: currency
+  }), status === "ready" && tab === "orders" && /*#__PURE__*/React.createElement(Orders, {
+    orders: orders,
+    setOrders: setOrders,
+    currency: currency,
+    onRefresh: loadOrders,
+    loading: ordersLoading
+  }), status === "ready" && tab === "settings" && /*#__PURE__*/React.createElement(SettingsPanel, {
+    settings: settings,
+    setSettings: setSettings
+  })));
+}
+function App() {
+  const [loggedIn, setLoggedIn] = useState(!!API.token);
+  useEffect(() => {
+    const h = () => setLoggedIn(false);
+    window.addEventListener("hf-logout", h);
+    return () => window.removeEventListener("hf-logout", h);
+  }, []);
+  if (/PUT_/.test(HARAM_CONFIG.apiUrl + HARAM_CONFIG.sheetId)) {
+    return /*#__PURE__*/React.createElement("div", {
+      className: "p-10 text-center text-red-600 font-bold"
+    }, "\u0644\u0627\u0632\u0645 \u062A\u062D\u0637 sheetId \u0648 apiUrl \u0641\u064A \u0645\u0644\u0641 js/config.js \u0627\u0644\u0623\u0648\u0644");
+  }
+  if (!loggedIn) return /*#__PURE__*/React.createElement(LoginScreen, {
+    onSuccess: () => setLoggedIn(true)
+  });
+  return /*#__PURE__*/React.createElement(Dashboard, {
+    onLogout: () => {
+      API.setToken("");
+      setLoggedIn(false);
+    }
+  });
+}
+ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));
+</script>
+</body>
+</html>
